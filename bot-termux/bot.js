@@ -2,10 +2,6 @@ const { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore } = req
 const pino = require('pino')
 const { io } = require('socket.io-client')
 
-// Estas dos variables las pega el panel web en el comando que te da (paso 1).
-// También puedes exportarlas a mano antes de correr el bot:
-//   export SESSION_ID=ABCD1234
-//   export SERVER_URL=https://tu-panel.ejemplo.com
 const SESSION_ID = process.env.SESSION_ID
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000'
 
@@ -20,22 +16,13 @@ const GROQ_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct'
 let groqApiKey = null
 let ajustesContactos = {}
 let sockWA = null
+let telefonoPendiente = null
 let refrescarContactosAhora = () => {}
 
-const panel = io(SERVER_URL, { transports: ['websocket'] })
-
-panel.on('connect', () => {
-  console.log('🔗 Conectado al panel web, autenticando sesión...')
-  panel.emit('worker:auth', { sessionId: SESSION_ID })
-})
-
-panel.on('server:error', ({ mensaje }) => {
-  console.log('❌', mensaje)
-})
-
-panel.on('server:request_pairing', async ({ phone }) => {
+async function solicitarCodigo(phone) {
   if (!sockWA) {
-    console.log('⚠️ El socket de WhatsApp aún no está listo, intenta de nuevo en unos segundos.')
+    telefonoPendiente = phone
+    console.log('⏳ Aún inicializando WhatsApp, el código se pedirá apenas esté listo…')
     return
   }
   try {
@@ -48,6 +35,21 @@ panel.on('server:request_pairing', async ({ phone }) => {
   } catch (e) {
     console.log('❌ No se pudo generar el código de vinculación:', e.message)
   }
+}
+
+const panel = io(SERVER_URL, { transports: ['websocket'] })
+
+panel.on('connect', () => {
+  console.log('🔗 Conectado al panel web, autenticando sesión...')
+  panel.emit('worker:auth', { sessionId: SESSION_ID })
+})
+
+panel.on('server:error', ({ mensaje }) => {
+  console.log('❌', mensaje)
+})
+
+panel.on('server:request_pairing', ({ phone }) => {
+  solicitarCodigo(phone)
 })
 
 panel.on('server:set_apikey', ({ apiKey }) => {
@@ -77,6 +79,12 @@ async function iniciarWhatsApp() {
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
     markOnlineOnConnect: false
   })
+
+  if (telefonoPendiente) {
+    const t = telefonoPendiente
+    telefonoPendiente = null
+    solicitarCodigo(t)
+  }
 
   const contactosMap = new Map()
 
@@ -136,7 +144,7 @@ async function iniciarWhatsApp() {
     if (!msg || !msg.message || msg.key.fromMe) return
 
     const remitente = msg.key.remoteJid
-    if (!remitente || remitente.endsWith('@g.us')) return // por seguridad, no autoresponde en grupos
+    if (!remitente || remitente.endsWith('@g.us')) return
 
     if (!ajustesContactos[remitente]) return
     if (!groqApiKey) return
