@@ -1,1 +1,14 @@
-
+{
+  "name": "whatsapp-ai-panel-bot",
+  "version": "1.0.0",
+  "description": "Worker de Termux: conecta WhatsApp con el panel web mediante Socket.io",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^9.2.0",
+    "socket.io-client": "^4.7.5"
+  }
+}
