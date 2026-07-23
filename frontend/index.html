@@ -1,1 +1,115 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Panel IA · WhatsApp</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
 
+<div class="fondo-senal" aria-hidden="true"></div>
+
+<header class="cabecera">
+  <div class="marca">
+    <span class="marca-nodo"></span>
+    <span class="marca-texto">panel<strong>señal</strong></span>
+  </div>
+  <p class="cabecera-sub">Enruta tu WhatsApp a través de un worker propio y decide, contacto por contacto, quién habla con la IA.</p>
+</header>
+
+<main class="lienzo">
+
+  <!-- Rastreador de señal: Termux -> Servidor -> WhatsApp -> Panel -->
+  <ol class="ruta-senal" id="ruta-senal">
+    <li class="ruta-punto" data-punto="termux"><span class="punto-nodo"></span><span class="punto-label">Termux</span></li>
+    <li class="ruta-linea"></li>
+    <li class="ruta-punto" data-punto="whatsapp"><span class="punto-nodo"></span><span class="punto-label">WhatsApp</span></li>
+    <li class="ruta-linea"></li>
+    <li class="ruta-punto" data-punto="groq"><span class="punto-nodo"></span><span class="punto-label">Groq</span></li>
+    <li class="ruta-linea"></li>
+    <li class="ruta-punto" data-punto="panel"><span class="punto-nodo"></span><span class="punto-label">Panel</span></li>
+  </ol>
+
+  <!-- PASO 1 -->
+  <section class="paso" id="paso-1" data-activo="true">
+    <div class="paso-cabecera">
+      <span class="paso-eyebrow">01 · Enlazar worker</span>
+      <h1>Genera tu worker de Termux</h1>
+      <p>Escribe el número que usarás en WhatsApp (con código de país) y te damos el comando exacto para pegar en Termux.</p>
+    </div>
+
+    <form id="form-telefono" class="fila-input">
+      <input type="tel" id="input-telefono" placeholder="Ej: 573001234567" required autocomplete="off" />
+      <button type="submit" class="boton-principal">Generar comando</button>
+    </form>
+
+    <div class="bloque-oculto" id="bloque-comando">
+      <p class="etiqueta-mono">Comando para pegar en Termux</p>
+      <pre class="caja-codigo" id="caja-comando"><code id="texto-comando"></code></pre>
+      <button class="boton-secundario" id="boton-copiar-comando" type="button">Copiar comando</button>
+
+      <ol class="lista-pasos">
+        <li>Instala Node.js en Termux si no lo tienes: <code>pkg install nodejs git -y</code></li>
+        <li>Pega y ejecuta el comando de arriba dentro de la carpeta del bot.</li>
+        <li>Cuando la terminal muestre el código de vinculación, aparecerá también aquí abajo.</li>
+      </ol>
+
+      <div class="estado-espera" id="estado-espera-termux">
+        <span class="pulso"></span>
+        <span id="texto-estado-termux">Esperando que ejecutes el comando en Termux…</span>
+      </div>
+
+      <div class="bloque-oculto" id="bloque-pairing">
+        <p class="etiqueta-mono">Código para vincular en WhatsApp</p>
+        <div class="codigo-pairing" id="codigo-pairing">----</div>
+        <p class="texto-ayuda">WhatsApp → Dispositivos vinculados → Vincular con número de teléfono</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- PASO 2 -->
+  <section class="paso" id="paso-2" data-activo="false">
+    <div class="paso-cabecera">
+      <span class="paso-eyebrow">02 · Motor de IA</span>
+      <h1>Conecta tu API key de Groq</h1>
+      <p>Tu WhatsApp ya está vinculado. Esta clave se envía directo a tu propio worker de Termux, nunca queda guardada en este servidor.</p>
+    </div>
+
+    <form id="form-apikey" class="fila-input">
+      <input type="password" id="input-apikey" placeholder="gsk_••••••••••••••••••••••••" required autocomplete="off" />
+      <button type="submit" class="boton-principal">Guardar clave</button>
+    </form>
+    <p class="texto-ayuda">¿No tienes una? Consíguela gratis en <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a></p>
+  </section>
+
+  <!-- PASO 3 -->
+  <section class="paso" id="paso-3" data-activo="false">
+    <div class="paso-cabecera">
+      <span class="paso-eyebrow">03 · Control</span>
+      <h1>Tus contactos</h1>
+      <p>Activa la IA solo en las conversaciones donde quieras respuesta automática. Los grupos nunca reciben auto-respuesta.</p>
+    </div>
+
+    <div class="fila-input">
+      <input type="text" id="input-filtro" placeholder="Buscar contacto…" autocomplete="off" />
+      <button class="boton-secundario" id="boton-refrescar" type="button">Refrescar</button>
+    </div>
+
+    <div class="lista-contactos" id="lista-contactos">
+      <p class="texto-ayuda" id="texto-sin-contactos">Aún no llegan contactos desde tu worker. Escríbete algún chat en WhatsApp o pulsa «Refrescar».</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="pie">
+  <span id="pie-sesion"></span>
+</footer>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
