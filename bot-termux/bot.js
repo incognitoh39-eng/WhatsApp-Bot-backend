@@ -1,7 +1,12 @@
-const { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys')
+const { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys')
 const pino = require('pino')
 const { io } = require('socket.io-client')
+const fs = require('fs')
 
+// Estas dos variables las pega el panel web en el comando que te da (paso 1).
+// También puedes exportarlas a mano antes de correr el bot:
+//   export SESSION_ID=ABCD1234
+//   export SERVER_URL=https://tu-panel.ejemplo.com
 const SESSION_ID = process.env.SESSION_ID
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000'
 
@@ -16,26 +21,7 @@ const GROQ_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct'
 let groqApiKey = null
 let ajustesContactos = {}
 let sockWA = null
-let telefonoPendiente = null
 let refrescarContactosAhora = () => {}
-
-async function solicitarCodigo(phone) {
-  if (!sockWA) {
-    telefonoPendiente = phone
-    console.log('⏳ Aún inicializando WhatsApp, el código se pedirá apenas esté listo…')
-    return
-  }
-  try {
-    const numeroLimpio = String(phone).replace(/[^0-9]/g, '')
-    const codigo = await sockWA.requestPairingCode(numeroLimpio)
-    const formateado = codigo.match(/.{1,4}/g).join('-')
-    console.log(`\n🔑 CÓDIGO DE VINCULACIÓN: ${formateado}`)
-    console.log('Ingresa este código en: WhatsApp → Dispositivos vinculados → Vincular con número de teléfono\n')
-    panel.emit('worker:pairing_code', { sessionId: SESSION_ID, code: formateado })
-  } catch (e) {
-    console.log('❌ No se pudo generar el código de vinculación:', e.message)
-  }
-}
 
 const panel = io(SERVER_URL, { transports: ['websocket'] })
 
@@ -48,8 +34,21 @@ panel.on('server:error', ({ mensaje }) => {
   console.log('❌', mensaje)
 })
 
-panel.on('server:request_pairing', ({ phone }) => {
-  solicitarCodigo(phone)
+panel.on('server:request_pairing', async ({ phone }) => {
+  if (!sockWA) {
+    console.log('⚠️ El socket de WhatsApp aún no está listo, intenta de nuevo en unos segundos.')
+    return
+  }
+  try {
+    const numeroLimpio = String(phone).replace(/[^0-9]/g, '')
+    const codigo = await sockWA.requestPairingCode(numeroLimpio)
+    const formateado = codigo.match(/.{1,4}/g).join('-')
+    console.log(`\n🔑 CÓDIGO DE VINCULACIÓN: ${formateado}`)
+    console.log('Ingresa este código en: WhatsApp → Dispositivos vinculados → Vincular con número de teléfono\n')
+    panel.emit('worker:pairing_code', { sessionId: SESSION_ID, code: formateado })
+  } catch (e) {
+    console.log('❌ No se pudo generar el código de vinculación:', e.message)
+  }
 })
 
 panel.on('server:set_apikey', ({ apiKey }) => {
@@ -69,8 +68,10 @@ panel.on('server:refresh_contacts', () => {
 
 async function iniciarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('sesion_whatsapp')
+  const { version } = await fetchLatestBaileysVersion()
 
   sockWA = makeWASocket({
+    version,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
@@ -79,12 +80,6 @@ async function iniciarWhatsApp() {
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
     markOnlineOnConnect: false
   })
-
-  if (telefonoPendiente) {
-    const t = telefonoPendiente
-    telefonoPendiente = null
-    solicitarCodigo(t)
-  }
 
   const contactosMap = new Map()
 
@@ -125,15 +120,28 @@ async function iniciarWhatsApp() {
     emitirContactos()
   })
 
-  sockWA.ev.on('connection.update', ({ connection }) => {
+  sockWA.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     if (connection === 'open') {
       console.log('✅ WhatsApp vinculado correctamente.')
       panel.emit('worker:status', { sessionId: SESSION_ID, status: 'conectado' })
       setTimeout(emitirContactos, 3000)
     }
     if (connection === 'close') {
-      console.log('⚠️ Conexión con WhatsApp cerrada, reintentando en 5s...')
+      const statusCode = lastDisconnect?.error?.output?.statusCode
+      const razon = lastDisconnect?.error?.message || 'desconocida'
+      console.log(`⚠️ Conexión con WhatsApp cerrada (código ${statusCode || '?'}): ${razon}`)
       panel.emit('worker:status', { sessionId: SESSION_ID, status: 'desconectado' })
+
+      if (statusCode === DisconnectReason.loggedOut) {
+        console.log('🚫 La sesión fue cerrada/deslogueada desde el celular. Borra la carpeta "sesion_whatsapp" y vuelve a generar el código de vinculación.')
+        return // no reintenta: con credenciales inválidas solo repetiría el mismo error
+      }
+
+      if (statusCode === DisconnectReason.restartRequired) {
+        console.log('🔄 WhatsApp pidió reiniciar la conexión (normal justo después de vincular). Reintentando...')
+      } else {
+        console.log('⏳ Reintentando en 5s...')
+      }
       setTimeout(iniciarWhatsApp, 5000)
     }
   })
@@ -144,7 +152,7 @@ async function iniciarWhatsApp() {
     if (!msg || !msg.message || msg.key.fromMe) return
 
     const remitente = msg.key.remoteJid
-    if (!remitente || remitente.endsWith('@g.us')) return
+    if (!remitente || remitente.endsWith('@g.us')) return // por seguridad, no autoresponde en grupos
 
     if (!ajustesContactos[remitente]) return
     if (!groqApiKey) return
