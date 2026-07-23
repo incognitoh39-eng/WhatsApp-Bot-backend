@@ -6,6 +6,7 @@ const { Server } = require('socket.io')
 const { randomBytes } = require('crypto')
 
 const app = express()
+app.set('trust proxy', 1) // necesario para detectar https detrás del proxy de Render/Railway
 app.use(cors())
 app.use(express.json())
 app.use(express.static(path.join(__dirname, '..', 'frontend')))
@@ -31,7 +32,6 @@ function crearSesion() {
 }
 
 function limpiarSesionesViejas() {
-  // Evita que se acumulen sesiones abandonadas (sin worker ni clientes) por más de 2 horas.
   const ahora = Date.now()
   for (const [id, s] of sesiones.entries()) {
     if (!s.workerSocketId && s.clientSocketIds.size === 0 && s.creadaEn && ahora - s.creadaEn > 2 * 60 * 60 * 1000) {
@@ -54,7 +54,6 @@ app.get('/api/session/:id/status', (req, res) => {
 })
 
 io.on('connection', socket => {
-  // --- El bot de Termux se identifica como "worker" de una sesión ---
   socket.on('worker:auth', ({ sessionId }) => {
     const s = sesiones.get(sessionId)
     if (!s) {
@@ -65,10 +64,15 @@ io.on('connection', socket => {
     socket.join(`worker:${sessionId}`)
     socket.data.sessionId = sessionId
     socket.data.rol = 'worker'
+
+    if (s.phonePendiente) {
+      s.status = 'solicitando_codigo'
+      io.to(`worker:${sessionId}`).emit('server:request_pairing', { phone: s.phonePendiente })
+    }
+
     io.to(`cliente:${sessionId}`).emit('server:status', { status: s.status, hasApiKey: !!s.apiKey, contacts: s.contacts })
   })
 
-  // --- El navegador se une como "cliente" de una sesión ---
   socket.on('client:join', ({ sessionId }) => {
     const s = sesiones.get(sessionId)
     if (!s) {
@@ -88,7 +92,9 @@ io.on('connection', socket => {
 
   socket.on('client:request_pairing', ({ sessionId, phone }) => {
     const s = sesiones.get(sessionId)
-    if (!s || !s.workerSocketId) return
+    if (!s) return
+    s.phonePendiente = phone
+    if (!s.workerSocketId) return
     s.status = 'solicitando_codigo'
     io.to(`worker:${sessionId}`).emit('server:request_pairing', { phone })
   })
