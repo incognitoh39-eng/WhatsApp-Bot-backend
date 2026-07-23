@@ -34,21 +34,12 @@ panel.on('server:error', ({ mensaje }) => {
   console.log('❌', mensaje)
 })
 
+let numeroPendiente = null
+
 panel.on('server:request_pairing', async ({ phone }) => {
-  if (!sockWA) {
-    console.log('⚠️ El socket de WhatsApp aún no está listo, intenta de nuevo en unos segundos.')
-    return
-  }
-  try {
-    const numeroLimpio = String(phone).replace(/[^0-9]/g, '')
-    const codigo = await sockWA.requestPairingCode(numeroLimpio)
-    const formateado = codigo.match(/.{1,4}/g).join('-')
-    console.log(`\n🔑 CÓDIGO DE VINCULACIÓN: ${formateado}`)
-    console.log('Ingresa este código en: WhatsApp → Dispositivos vinculados → Vincular con número de teléfono\n')
-    panel.emit('worker:pairing_code', { sessionId: SESSION_ID, code: formateado })
-  } catch (e) {
-    console.log('❌ No se pudo generar el código de vinculación:', e.message)
-  }
+  numeroPendiente = String(phone).replace(/[^0-9]/g, '')
+  console.log('📱 Número recibido, generando socket nuevo para vincular...')
+  await iniciarWhatsApp() // socket 100% fresco: el código se pide apenas se crea, como exige Baileys
 })
 
 panel.on('server:set_apikey', ({ apiKey }) => {
@@ -67,6 +58,10 @@ panel.on('server:refresh_contacts', () => {
 })
 
 async function iniciarWhatsApp() {
+  if (sockWA) {
+    try { sockWA.end(undefined) } catch (e) { /* ya estaba cerrado, ignorar */ }
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState('sesion_whatsapp')
   const { version } = await fetchLatestBaileysVersion()
 
@@ -80,6 +75,21 @@ async function iniciarWhatsApp() {
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
     markOnlineOnConnect: false
   })
+
+  // Debe pedirse justo aquí, apenas se crea el socket — si se pide más tarde
+  // sobre un socket que ya venía conectando por su cuenta, WhatsApp lo rechaza (401).
+  if (numeroPendiente && !sockWA.authState.creds.registered) {
+    try {
+      const codigo = await sockWA.requestPairingCode(numeroPendiente)
+      const formateado = codigo.match(/.{1,4}/g).join('-')
+      console.log(`\n🔑 CÓDIGO DE VINCULACIÓN: ${formateado}`)
+      console.log('Ingresa este código en: WhatsApp → Dispositivos vinculados → Vincular con número de teléfono\n')
+      panel.emit('worker:pairing_code', { sessionId: SESSION_ID, code: formateado })
+    } catch (e) {
+      console.log('❌ No se pudo generar el código de vinculación:', e.message)
+    }
+    numeroPendiente = null
+  }
 
   const contactosMap = new Map()
 
