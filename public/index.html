@@ -576,14 +576,18 @@ input,textarea{font-family:inherit;}
           </div>
           <div class="card">
             <div class="stat-label">Mensajes procesados</div>
-            <div class="stat-value dim">—</div>
+            <div class="stat-value dim" id="dashMensajesProcesados">—</div>
           </div>
         </div>
 
         <div class="panel">
           <h3 class="panel-title">Actividad reciente</h3>
-          <p class="panel-sub">Aún no hay un endpoint de actividad en el backend, así que esta sección se completará automáticamente cuando esté disponible.</p>
-          <div class="empty-note">Esta función requiere un endpoint como <b>GET /api/actividad</b> en el backend.</div>
+          <p class="panel-sub">Últimos eventos del bot: mensajes recibidos, respuestas enviadas y cambios de configuración.</p>
+          <div id="actividadContenido">
+            <div class="skeleton skel-row"></div>
+            <div class="skeleton skel-row"></div>
+            <div class="skeleton skel-row"></div>
+          </div>
         </div>
       </section>
 
@@ -592,7 +596,7 @@ input,textarea{font-family:inherit;}
         <div class="view-header">
           <div>
             <h2 class="view-title">Contactos</h2>
-            <p class="view-desc">Controla individualmente qué contactos pueden recibir respuestas automáticas de MyIABot.Js.</p>
+            <p class="view-desc">Controla individualmente qué contactos pueden recibir respuestas automáticas de MyIABot.Js. Solo se muestran contactos con actividad en el último mes.</p>
           </div>
         </div>
 
@@ -894,6 +898,7 @@ function cambiarSeccion(nombre) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.seccion === nombre));
   cerrarSidebarMovil();
 
+  if (nombre === 'dashboard') cargarActividadReciente();
   if (nombre === 'contactos') cargarContactos();
   if (nombre === 'grupos') cargarGrupos();
   if (nombre === 'probar' && appState.chatHistorial.length === 0) inicializarChat();
@@ -918,6 +923,22 @@ function setBotonCargando(btn, cargando, textoCargando) {
     btn.disabled = false;
     if (btn.dataset.original) btn.innerHTML = btn.dataset.original;
   }
+}
+
+/* ================================================================
+   UTILIDAD: tiempo relativo ("hace 3 min", "hace 2 h", "hace 5 d")
+   ================================================================ */
+function formatTiempoRelativo(timestamp) {
+  if (!timestamp) return '';
+  const diffMs = Date.now() - timestamp;
+  const seg = Math.floor(diffMs / 1000);
+  if (seg < 60) return 'hace unos segundos';
+  const min = Math.floor(seg / 60);
+  if (min < 60) return `hace ${min} min`;
+  const horas = Math.floor(min / 60);
+  if (horas < 24) return `hace ${horas} h`;
+  const dias = Math.floor(horas / 24);
+  return `hace ${dias} d`;
 }
 
 /* ================================================================
@@ -964,6 +985,7 @@ function mostrarPanel() {
   document.getElementById('appView').classList.remove('oculto');
   cambiarSeccion('dashboard');
   cargarEstado();
+  cargarActividadReciente();
   iniciarPolling();
 }
 
@@ -991,7 +1013,10 @@ if (appState.token) {
 function iniciarPolling() {
   detenerPolling();
   appState.pollingId = setInterval(() => {
-    if (appState.autoUpdate) cargarEstado();
+    if (appState.autoUpdate) {
+      cargarEstado();
+      if (appState.seccionActual === 'dashboard') cargarActividadReciente();
+    }
   }, 5000);
 }
 function detenerPolling() {
@@ -1069,6 +1094,7 @@ async function actualizarTodo() {
   btn.disabled = true;
   await Promise.all([
     cargarEstado(),
+    cargarActividadReciente(),
     appState.seccionActual === 'contactos' || true ? cargarContactos(true) : null,
     cargarGrupos(true)
   ]);
@@ -1077,10 +1103,62 @@ async function actualizarTodo() {
 }
 
 /* ================================================================
+   ACTIVIDAD RECIENTE (dashboard)
+   ================================================================
+   Consume GET /api/actividad -> { ok:true, actividad:[{ tipo, detalle, timestamp }] }
+*/
+const ETIQUETAS_ACTIVIDAD = {
+  mensaje_privado: 'Mensaje recibido',
+  respuesta_privada: 'Respuesta enviada',
+  mensaje_grupo: 'Mensaje en grupo',
+  respuesta_grupo: 'Respuesta en grupo',
+  contacto_activado: 'Contacto activado',
+  contacto_desactivado: 'Contacto desactivado',
+  grupo_activado: 'Grupo activado',
+  grupo_desactivado: 'Grupo desactivado',
+  grupos_global: 'Grupos (global)',
+  groq_vinculado: 'Groq vinculado',
+  groq_desvinculado: 'Groq desvinculado',
+  historial_borrado: 'Historial borrado',
+  reset_chat: 'Conversación reiniciada'
+};
+
+async function cargarActividadReciente() {
+  const cont = document.getElementById('actividadContenido');
+  try {
+    const datos = await apiFetch('/api/actividad?limite=15');
+    renderActividadReciente(datos.actividad || []);
+  } catch (e) {
+    if (e.tipo === '404') {
+      cont.innerHTML = `<div class="empty-note">Esta función requiere el endpoint <b>GET /api/actividad</b> en el backend.</div>`;
+    }
+    // otros errores (red, 500) durante el polling se ignoran en silencio
+  }
+}
+
+function renderActividadReciente(eventos) {
+  const cont = document.getElementById('actividadContenido');
+  if (!eventos || eventos.length === 0) {
+    cont.innerHTML = `<div class="empty-note">Todavía no hay actividad registrada. Aparecerá aquí en cuanto el bot reciba o responda un mensaje.</div>`;
+    return;
+  }
+
+  cont.innerHTML = eventos.map(ev => `
+    <div class="activity-item">
+      <div class="activity-dot"></div>
+      <div class="activity-text">
+        <b>${escaparTexto(ETIQUETAS_ACTIVIDAD[ev.tipo] || 'Evento')}</b>
+        <span>${escaparTexto(ev.detalle || '')} · ${formatTiempoRelativo(ev.timestamp)}</span>
+      </div>
+    </div>`).join('');
+}
+
+/* ================================================================
    CONTACTOS
    ================================================================
    Espera del backend: GET /api/contactos ->
-   { ok:true, contactos:[{ id, nombre, numero, avatar, botActivo }] }
+   { ok:true, contactos:[{ id, nombre, numero, avatar, botActivo, ultimaActividad }] }
+   Solo incluye contactos con actividad en el último mes (filtrado en backend).
 */
 async function cargarContactos(silencioso = false) {
   const cont = document.getElementById('contactosContenido');
@@ -1120,7 +1198,7 @@ function renderContactos() {
   });
 
   if (lista.length === 0) {
-    cont.innerHTML = `<div class="empty-note">No se encontraron contactos con ese criterio.</div>`;
+    cont.innerHTML = `<div class="empty-note">No se encontraron contactos recientes con ese criterio. Solo se muestran contactos con actividad en el último mes.</div>`;
     return;
   }
 
@@ -1129,7 +1207,7 @@ function renderContactos() {
       <div class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-6 8-6s8 2 8 6"/></svg></div>
       <div class="item-info">
         <div class="item-name">${escaparTexto(c.nombre)}</div>
-        <div class="item-sub">${escaparTexto(c.numero || '')}</div>
+        <div class="item-sub">${escaparTexto(c.numero || '')} · ${formatTiempoRelativo(c.ultimaActividad)}</div>
       </div>
       <div class="item-right">
         <span class="item-status-text">${c.botActivo ? 'Activado' : 'Desactivado'}</span>
@@ -1151,6 +1229,7 @@ async function guardarConfigContacto(contactoId, activo) {
     const c = appState.contactos.find(x => x.id === contactoId);
     if (c) c.botActivo = activo;
     mostrarToast(datos.mensaje || 'Configuración actualizada', 'ok');
+    cargarActividadReciente();
   } catch (e) {
     mostrarToast('No se pudo actualizar', 'err');
     renderContactos(); // revierte el switch visualmente
@@ -1267,6 +1346,7 @@ async function cambiarGruposGlobal(activo) {
     document.getElementById('cfgGruposBadge').textContent = activo ? 'Activado' : 'Desactivado';
     mostrarToast(datos.mensaje || 'Configuración de grupos actualizada', 'ok');
     cargarGrupos(true);
+    cargarActividadReciente();
   } catch (e) {
     mostrarToast('No se pudo actualizar', 'err');
     document.getElementById('toggleGruposGlobal').checked = !activo;
@@ -1283,6 +1363,7 @@ async function guardarConfigGrupo(grupoId, activo) {
     const g = appState.grupos.find(x => x.id === grupoId);
     if (g) g.botActivo = activo;
     mostrarToast(datos.mensaje || 'Grupo actualizado', 'ok');
+    cargarActividadReciente();
   } catch (e) {
     mostrarToast('No se pudo actualizar', 'err');
     renderGrupos();
@@ -1310,6 +1391,7 @@ async function vincularGroq() {
     mostrarToast(datos.mensaje || 'API key vinculada con éxito.', datos.ok ? 'ok' : 'err');
     document.getElementById('apiKey').value = '';
     cargarEstado();
+    cargarActividadReciente();
   } catch (e) {
     mostrarToast(e.mensaje || 'Error de conexión.', 'err');
   } finally {
@@ -1332,6 +1414,7 @@ async function desvincularGroq() {
     const datos = await apiFetch('/api/desvincular-groq', { method: 'POST' });
     mostrarToast(datos.mensaje || 'API key eliminada.', 'ok');
     cargarEstado();
+    cargarActividadReciente();
   } catch (e) {
     mostrarToast(e.mensaje || 'Error de conexión.', 'err');
   }
@@ -1355,6 +1438,7 @@ async function borrarHistorial() {
     const datos = await apiFetch('/api/borrar-historial', { method: 'POST' });
     mostrarToast(datos.mensaje || 'Memoria eliminada correctamente', 'ok');
     cargarEstado();
+    cargarActividadReciente();
   } catch (e) {
     mostrarToast(e.mensaje || 'Error de conexión.', 'err');
   }
@@ -1468,12 +1552,12 @@ document.addEventListener('input', (e) => {
 });
 
 /* ================================================================
-   ENDPOINTS NECESARIOS DEL BACKEND (aún no implementados)
+   ENDPOINTS DEL BACKEND USADOS POR ESTE PANEL
    ================================================================
 
    GET /api/contactos
-     Headers: Authorization: Bearer TOKEN
-     Devuelve: { ok:true, contactos:[{ id, nombre, numero, avatar, botActivo }] }
+     Devuelve: { ok:true, contactos:[{ id, nombre, numero, avatar, botActivo, ultimaActividad }] }
+     Solo incluye contactos con actividad (mensaje recibido) en los últimos 30 días.
 
    POST /api/contactos/configurar
      Body:    { contactoId, activo }
@@ -1493,6 +1577,10 @@ document.addEventListener('input', (e) => {
    POST /api/probar-bot
      Body:    { mensaje }
      Devuelve:{ ok:true, respuesta }
+
+   GET /api/actividad?limite=15
+     Devuelve: { ok:true, actividad:[{ tipo, detalle, timestamp }] }
+     Feed de eventos recientes del bot para el panel Dashboard.
 
    Rutas existentes que NO deben modificarse:
    POST /api/login, GET /api/estado, POST /api/vincular-groq,
