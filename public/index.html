@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Panel del Bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: Arial, sans-serif;
+    background: #0d0d0d;
+    color: #fff;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 20px;
+  }
+  .card {
+    background: #1a1a1a;
+    padding: 30px;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+  }
+  h1 { font-size: 20px; text-align: center; margin-bottom: 20px; }
+  input {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #222;
+    color: #fff;
+  }
+  button {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: #6c2bd9;
+    color: #fff;
+    font-weight: bold;
+    cursor: pointer;
+    margin-bottom: 10px;
+  }
+  button.secundario { background: #333; }
+  button.peligro { background: #a12b2b; }
+  #resultadoLogin, #resultadoGroq, #resultadoHistorial { margin-top: 10px; text-align: center; font-size: 14px; }
+  .oculto { display: none; }
+  .fila {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid #2a2a2a;
+    font-size: 14px;
+  }
+  .fila span:first-child { color: #999; }
+  .badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: bold;
+  }
+  .badge.on { background: #1e4d2b; color: #4caf50; }
+  .badge.off { background: #4d1e1e; color: #f44336; }
+  .seccion-titulo {
+    font-size: 13px;
+    color: #999;
+    margin: 20px 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .ayuda {
+    font-size: 12px;
+    color: #777;
+    margin-top: -6px;
+    margin-bottom: 15px;
+  }
+</style>
+</head>
+<body>
+
+  <div class="card" id="vistaLogin">
+    <h1>🔐 Acceso al Panel</h1>
+    <input id="codigo" type="text" placeholder="Código mostrado en Termux" maxlength="6">
+    <button onclick="login()">Entrar</button>
+    <div id="resultadoLogin"></div>
+  </div>
+
+  <div class="card oculto" id="vistaPanel">
+    <h1>🌑 Panel del Bot</h1>
+
+    <div class="fila"><span>Estado</span><span id="estadoConexion" class="badge off">—</span></div>
+    <div class="fila"><span>Número</span><span id="numeroBot">—</span></div>
+    <div class="fila"><span>Tiempo activo</span><span id="uptimeBot">—</span></div>
+    <div class="fila"><span>Groq vinculado</span><span id="groqEstado" class="badge off">—</span></div>
+    <div class="fila"><span>Conversaciones guardadas</span><span id="totalConversaciones">—</span></div>
+
+    <div class="seccion-titulo">API de Groq</div>
+    <div id="seccionGroq">
+      <input id="apiKey" type="password" placeholder="API Key de Groq">
+      <button onclick="vincularGroq()">Vincular API Key</button>
+      <button class="peligro oculto" id="btnDesvincular" onclick="desvincularGroq()">Desvincular API Key</button>
+      <div id="resultadoGroq"></div>
+    </div>
+
+    <div class="seccion-titulo">Memoria de conversaciones</div>
+    <div class="ayuda">El bot recuerda los últimos mensajes de cada chat para responder con contexto. También puedes escribir "/reset" en WhatsApp para borrar la memoria de una conversación puntual.</div>
+    <button class="peligro" onclick="borrarHistorial()">Borrar todo el historial</button>
+    <div id="resultadoHistorial"></div>
+
+    <button class="secundario" onclick="cerrarSesion()">Cerrar sesión</button>
+  </div>
+
+<script>
+let token = localStorage.getItem('token') || null
+
+function mostrarPanel() {
+  document.getElementById('vistaLogin').classList.add('oculto')
+  document.getElementById('vistaPanel').classList.remove('oculto')
+  cargarEstado()
+  setInterval(cargarEstado, 5000)
+}
+
+function mostrarLogin() {
+  document.getElementById('vistaPanel').classList.add('oculto')
+  document.getElementById('vistaLogin').classList.remove('oculto')
+}
+
+async function login() {
+  const codigo = document.getElementById('codigo').value.trim()
+  const resultado = document.getElementById('resultadoLogin')
+  resultado.textContent = 'Verificando...'
+  resultado.style.color = '#ccc'
+
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codigo })
+    })
+    const datos = await resp.json()
+
+    if (datos.ok) {
+      token = datos.token
+      localStorage.setItem('token', token)
+      resultado.textContent = ''
+      mostrarPanel()
+    } else {
+      resultado.textContent = datos.mensaje
+      resultado.style.color = '#f44336'
+    }
+  } catch (e) {
+    resultado.textContent = 'Error de conexión con el bot.'
+    resultado.style.color = '#f44336'
+  }
+}
+
+async function cargarEstado() {
+  if (!token) return
+
+  try {
+    const resp = await fetch('/api/estado', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+
+    if (resp.status === 401) {
+      cerrarSesion()
+      return
+    }
+
+    const datos = await resp.json()
+    if (!datos.ok) return
+
+    const badgeConexion = document.getElementById('estadoConexion')
+    badgeConexion.textContent = datos.conectado ? 'Conectado' : 'Desconectado'
+    badgeConexion.className = 'badge ' + (datos.conectado ? 'on' : 'off')
+
+    document.getElementById('numeroBot').textContent = datos.numero || '—'
+    document.getElementById('uptimeBot').textContent = datos.uptime
+    document.getElementById('totalConversaciones').textContent = datos.conversacionesGuardadas ?? '0'
+
+    const badgeGroq = document.getElementById('groqEstado')
+    badgeGroq.textContent = datos.groqVinculado ? 'Sí' : 'No'
+    badgeGroq.className = 'badge ' + (datos.groqVinculado ? 'on' : 'off')
+
+    document.getElementById('btnDesvincular').classList.toggle('oculto', !datos.groqVinculado)
+
+    if (datos.groqVinculado) {
+      document.getElementById('apiKey').placeholder = `Vinculada: ${datos.groqKeyParcial}`
+    }
+  } catch (e) {}
+}
+
+async function vincularGroq() {
+  const apiKey = document.getElementById('apiKey').value.trim()
+  const resultado = document.getElementById('resultadoGroq')
+
+  if (!apiKey) {
+    resultado.textContent = 'Escribe una API key.'
+    resultado.style.color = '#f44336'
+    return
+  }
+
+  resultado.textContent = 'Vinculando...'
+  resultado.style.color = '#ccc'
+
+  try {
+    const resp = await fetch('/api/vincular-groq', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ apiKey })
+    })
+    const datos = await resp.json()
+    resultado.textContent = datos.mensaje
+    resultado.style.color = datos.ok ? '#4caf50' : '#f44336'
+    document.getElementById('apiKey').value = ''
+    cargarEstado()
+  } catch (e) {
+    resultado.textContent = 'Error de conexión.'
+    resultado.style.color = '#f44336'
+  }
+}
+
+async function desvincularGroq() {
+  const resultado = document.getElementById('resultadoGroq')
+  try {
+    const resp = await fetch('/api/desvincular-groq', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    const datos = await resp.json()
+    resultado.textContent = datos.mensaje
+    resultado.style.color = '#4caf50'
+    cargarEstado()
+  } catch (e) {}
+}
+
+async function borrarHistorial() {
+  const resultado = document.getElementById('resultadoHistorial')
+
+  if (!confirm('¿Borrar la memoria de TODAS las conversaciones? Esta acción no se puede deshacer.')) {
+    return
+  }
+
+  resultado.textContent = 'Borrando...'
+  resultado.style.color = '#ccc'
+
+  try {
+    const resp = await fetch('/api/borrar-historial', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    const datos = await resp.json()
+    resultado.textContent = datos.mensaje
+    resultado.style.color = '#4caf50'
+    cargarEstado()
+  } catch (e) {
+    resultado.textContent = 'Error de conexión.'
+    resultado.style.color = '#f44336'
+  }
+}
+
+function cerrarSesion() {
+  localStorage.removeItem('token')
+  token = null
+  mostrarLogin()
+}
+
+if (token) {
+  mostrarPanel()
+}
+</script>
+</body>
+</html>
