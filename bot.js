@@ -27,6 +27,10 @@ let numeroPropio = null
 let conectado = false
 const inicioBot = Date.now()
 
+// Referencia al socket de Baileys activo, para poder consultar grupos
+// (groupFetchAllParticipating) desde las rutas HTTP del panel.
+let socketActual = null
+
 function cargarConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
@@ -59,14 +63,14 @@ function guardarHistoriales(historiales) {
   }
 }
 
-function obtenerHistorialChat(numero) {
+function obtenerHistorialChat(id) {
   const historiales = cargarHistoriales()
-  return historiales[numero] || []
+  return historiales[id] || []
 }
 
-function agregarAlHistorial(numero, rolUsuario, textoUsuario, textoAsistente) {
+function agregarAlHistorial(id, textoUsuario, textoAsistente) {
   const historiales = cargarHistoriales()
-  const historialChat = historiales[numero] || []
+  const historialChat = historiales[id] || []
 
   historialChat.push({ role: 'user', content: textoUsuario })
   if (textoAsistente) {
@@ -78,13 +82,13 @@ function agregarAlHistorial(numero, rolUsuario, textoUsuario, textoAsistente) {
     historialChat.shift()
   }
 
-  historiales[numero] = historialChat
+  historiales[id] = historialChat
   guardarHistoriales(historiales)
 }
 
-function borrarHistorialChat(numero) {
+function borrarHistorialChat(id) {
   const historiales = cargarHistoriales()
-  delete historiales[numero]
+  delete historiales[id]
   guardarHistoriales(historiales)
 }
 
@@ -142,6 +146,25 @@ function formatUptime(ms) {
   return `${h}h ${m}m ${s}s`
 }
 
+// ====================
+// PERMISOS (contactos / grupos)
+// ====================
+// Todo se guarda dentro de config.json para no crear otro archivo:
+//   contactosBloqueados: string[]   -> números (sin "+") a los que el bot NO responde
+//   gruposActivadosGlobal: boolean  -> interruptor general de respuestas en grupos
+//   gruposPermitidos: string[]      -> ids de grupo (xxx@g.us) permitidos cuando el global está activo
+
+function contactoEstaActivo(config, numero) {
+  const bloqueados = config.contactosBloqueados || []
+  return !bloqueados.includes(numero)
+}
+
+function grupoEstaActivo(config, grupoId) {
+  if (!config.gruposActivadosGlobal) return false
+  const permitidos = config.gruposPermitidos || []
+  return permitidos.includes(grupoId)
+}
+
 function iniciarServidorWeb() {
   if (servidorIniciado) return
   servidorIniciado = true
@@ -150,6 +173,9 @@ function iniciarServidorWeb() {
   app.use(express.json())
   app.use(express.static(path.join(__dirname, 'public')))
 
+  // ====================
+  // LOGIN
+  // ====================
   app.post('/api/login', (req, res) => {
     const { codigo } = req.body || {}
     if (!codigo) return res.status(400).json({ ok: false, mensaje: 'Falta el código.' })
@@ -159,6 +185,9 @@ function iniciarServidorWeb() {
     return res.json({ ok: true, token })
   })
 
+  // ====================
+  // ESTADO
+  // ====================
   app.get('/api/estado', middlewareAuth, (req, res) => {
     const config = cargarConfig()
     const historiales = cargarHistoriales()
@@ -173,6 +202,9 @@ function iniciarServidorWeb() {
     })
   })
 
+  // ====================
+  // GROQ
+  // ====================
   app.post('/api/vincular-groq', middlewareAuth, (req, res) => {
     const { apiKey } = req.body || {}
     if (!apiKey || apiKey.trim().length < 10) return res.status(400).json({ ok: false, mensaje: 'API key inválida.' })
@@ -190,10 +222,130 @@ function iniciarServidorWeb() {
     return res.json({ ok: true, mensaje: 'API key eliminada.' })
   })
 
+  // ====================
+  // MEMORIA
+  // ====================
   app.post('/api/borrar-historial', middlewareAuth, (req, res) => {
     borrarTodoElHistorial()
     console.log('🗑️ Historial de todas las conversaciones borrado desde la página.')
     return res.json({ ok: true, mensaje: 'Historial borrado.' })
+  })
+
+  // ====================
+  // CONTACTOS
+  // ====================
+  // No existe un directorio de contactos en Baileys sin un store adicional,
+  // así que la lista se arma con los números que ya tienen historial de chat.
+  // El nombre solo se muestra si WhatsApp entrega un pushName reciente;
+  // si no, se muestra el número.
+  app.get('/api/contactos', middlewareAuth, (req, res) => {
+    const config = cargarConfig()
+    const historiales = cargarHistoriales()
+    const nombres = config.nombresContactos || {}
+
+    const contactos = Object.keys(historiales)
+      .filter(id => !id.endsWith('@g.us') && id.indexOf('@') === -1) // solo chats privados (guardados como número)
+      .map(numero => ({
+        id: numero,
+        nombre: nombres[numero] || numero,
+        numero: `+${numero}`,
+        avatar: null,
+        botActivo: contactoEstaActivo(config, numero)
+      }))
+
+    res.json({ ok: true, contactos })
+  })
+
+  app.post('/api/contactos/configurar', middlewareAuth, (req, res) => {
+    const { contactoId, activo } = req.body || {}
+    if (!contactoId) return res.status(400).json({ ok: false, mensaje: 'Falta contactoId.' })
+
+    const config = cargarConfig()
+    let bloqueados = config.contactosBloqueados || []
+
+    if (activo) {
+      bloqueados = bloqueados.filter(n => n !== contactoId)
+    } else if (!bloqueados.includes(contactoId)) {
+      bloqueados.push(contactoId)
+    }
+
+    config.contactosBloqueados = bloqueados
+    guardarConfig(config)
+    res.json({ ok: true, mensaje: 'Configuración actualizada.' })
+  })
+
+  // ====================
+  // GRUPOS
+  // ====================
+  app.get('/api/grupos', middlewareAuth, async (req, res) => {
+    if (!socketActual || !conectado) {
+      return res.status(503).json({ ok: false, mensaje: 'El bot todavía no está conectado a WhatsApp.' })
+    }
+    try {
+      const config = cargarConfig()
+      const gruposWA = await socketActual.groupFetchAllParticipating()
+      const grupos = Object.values(gruposWA).map(g => ({
+        id: g.id,
+        nombre: g.subject || g.id,
+        avatar: null,
+        botActivo: grupoEstaActivo(config, g.id)
+      }))
+      res.json({ ok: true, grupos })
+    } catch (e) {
+      console.log('❌ Error al obtener grupos:', e.message)
+      res.status(500).json({ ok: false, mensaje: 'No se pudieron obtener los grupos de WhatsApp.' })
+    }
+  })
+
+  app.get('/api/configuracion-grupos', middlewareAuth, (req, res) => {
+    const config = cargarConfig()
+    res.json({ ok: true, gruposActivados: !!config.gruposActivadosGlobal })
+  })
+
+  app.post('/api/configurar-grupos', middlewareAuth, (req, res) => {
+    const { global: esGlobal, activo, grupoId } = req.body || {}
+    const config = cargarConfig()
+
+    if (esGlobal) {
+      config.gruposActivadosGlobal = !!activo
+      guardarConfig(config)
+      return res.json({
+        ok: true,
+        mensaje: activo ? 'Respuestas en grupos activadas.' : 'Respuestas en grupos desactivadas.'
+      })
+    }
+
+    if (!grupoId) return res.status(400).json({ ok: false, mensaje: 'Falta grupoId.' })
+
+    let permitidos = config.gruposPermitidos || []
+    if (activo) {
+      if (!permitidos.includes(grupoId)) permitidos.push(grupoId)
+    } else {
+      permitidos = permitidos.filter(id => id !== grupoId)
+    }
+
+    config.gruposPermitidos = permitidos
+    guardarConfig(config)
+    res.json({ ok: true, mensaje: 'Grupo actualizado.' })
+  })
+
+  // ====================
+  // PROBAR BOT
+  // ====================
+  // Usa la misma IA (Groq) que WhatsApp, pero con un historial aislado:
+  // no lee ni escribe en historial.json, así que no afecta la memoria real.
+  app.post('/api/probar-bot', middlewareAuth, async (req, res) => {
+    const { mensaje } = req.body || {}
+    if (!mensaje || !mensaje.trim()) {
+      return res.status(400).json({ ok: false, mensaje: 'Falta el mensaje.' })
+    }
+    const config = cargarConfig()
+    if (!config.groqApiKey) {
+      return res.status(400).json({ ok: false, mensaje: 'Vincula una API key de Groq antes de probar el bot.' })
+    }
+
+    const respuesta = await responderConGroq([{ role: 'user', content: mensaje.trim() }])
+    res.json({ ok: true, respuesta: respuesta || 'No se pudo generar una respuesta.' })
   })
 
   app.listen(PUERTO, '0.0.0.0', () => {
@@ -280,6 +432,8 @@ async function iniciar() {
     markOnlineOnConnect: false
   })
 
+  socketActual = socket
+
   if (!state.creds.registered && !yaSolicitoCodigo) {
     yaSolicitoCodigo = true
     await new Promise(r => setTimeout(r, 3000))
@@ -309,6 +463,7 @@ async function iniciar() {
       console.log('✅ Bot conectado a WhatsApp!')
       yaSolicitoCodigo = false
       conectado = true
+      socketActual = socket
       const jidPropio = jidNormalizedUser(socket.user.id)
       numeroPropio = extraerNumero(jidPropio)
       console.log(`🪪 numeroPropio detectado: ${numeroPropio}`)
@@ -330,7 +485,38 @@ async function iniciar() {
     if (!msg || !msg.message) return
 
     const remoteJidOriginal = msg.key.remoteJid
+    const esFromMe = !!msg.key.fromMe
+    const texto = extraerTextoMensaje(msg.message)
+    if (!texto) return
 
+    // ---- Mensajes de grupo (@g.us) ----
+    if (remoteJidOriginal.endsWith('@g.us')) {
+      if (esFromMe) return // ignora los mensajes que el propio bot envía al grupo
+
+      const config = cargarConfig()
+      if (!grupoEstaActivo(config, remoteJidOriginal)) return // grupo no permitido o interruptor global apagado
+      if (!config.groqApiKey) return
+
+      console.log(`📩 [Grupo ${remoteJidOriginal}]: "${texto}"`)
+
+      if (COMANDOS_RESET.includes(texto.trim().toLowerCase())) {
+        borrarHistorialChat(remoteJidOriginal)
+        await socket.sendMessage(remoteJidOriginal, { text: '🧹 Listo, borré el historial de este grupo. Empezamos de cero.' })
+        return
+      }
+
+      const historialPrevio = obtenerHistorialChat(remoteJidOriginal)
+      const historialParaGroq = [...historialPrevio, { role: 'user', content: texto }]
+      const respuestaIA = await responderConGroq(historialParaGroq)
+      if (respuestaIA) {
+        await socket.sendMessage(remoteJidOriginal, { text: respuestaIA })
+        agregarAlHistorial(remoteJidOriginal, texto, respuestaIA)
+        console.log(`✅ Respondido en grupo ${remoteJidOriginal}`)
+      }
+      return
+    }
+
+    // ---- Mensajes privados (@s.whatsapp.net) ----
     // WhatsApp puede entregar algunos chats privados (incluido "Tú mismo")
     // usando addressingMode "lid", donde remoteJid viene como XXXXX@lid en
     // vez de numero@s.whatsapp.net. En esos casos Baileys expone el JID real
@@ -341,20 +527,14 @@ async function iniciar() {
       remitente = msg.key.remoteJidAlt
     }
 
-    // Solo chats privados 1 a 1. Se descartan grupos (@g.us),
-    // canales/newsletters (@newsletter) y listas de difusión.
     if (!remitente.endsWith('@s.whatsapp.net')) return
 
     const numeroRemitente = extraerNumero(remitente)
-    const esFromMe = !!msg.key.fromMe
     const esChatPropio = numeroRemitente && numeroPropio && numeroRemitente === numeroPropio
 
     // Si el mensaje lo envié yo (fromMe) y NO es mi propio chat, es que
     // le escribí a otra persona o ya respondí antes: se ignora.
     if (esFromMe && !esChatPropio) return
-
-    const texto = extraerTextoMensaje(msg.message)
-    if (!texto) return
 
     console.log(`📩 Mensaje de ${remitente}: "${texto}"`)
 
@@ -372,13 +552,18 @@ async function iniciar() {
       return
     }
 
+    if (!contactoEstaActivo(config, numeroRemitente)) {
+      console.log(`🔕 Contacto ${numeroRemitente} tiene el bot desactivado, no se responde.`)
+      return
+    }
+
     const historialPrevio = obtenerHistorialChat(numeroRemitente)
     const historialParaGroq = [...historialPrevio, { role: 'user', content: texto }]
 
     const respuestaIA = await responderConGroq(historialParaGroq)
     if (respuestaIA) {
       await socket.sendMessage(remoteJidOriginal, { text: respuestaIA })
-      agregarAlHistorial(numeroRemitente, 'user', texto, respuestaIA)
+      agregarAlHistorial(numeroRemitente, texto, respuestaIA)
       console.log(`✅ Respondido a ${remitente}`)
     }
   })
